@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /* --------------------------------------------------------------------- *
- |  OpenKM Filesystem MCP                                                |
+ | OpenKM Filesystem MCP                                                 |
  |  – navigate the OpenKM repository and read PDFs as plain text         |
  * --------------------------------------------------------------------- */
 
@@ -18,6 +18,7 @@ import {
 import fetch from "node-fetch";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 /* ---------- 1.  Environment & helper -------------------------------- */
 
@@ -27,15 +28,19 @@ const {
 	OKM_PASS = "admin",
 } = process.env;
 
-function okmHeaders(extra: Record<string, string> = {}) {
+function okmHeaders(overrideHeaders: Record<string, string> = {}) {
 	const auth = Buffer.from(`${OKM_USER}:${OKM_PASS}`).toString("base64");
-	return { Authorization: `Basic ${auth}`, ...extra };
+	return {
+		Authorization: `Basic ${auth}`,
+		Accept: "application/json", // Default Accept header
+		...overrideHeaders
+	};
 }
 
-async function okmGet(path: string, qs: Record<string, string> = {}) {
+async function okmGet(path: string, qs: Record<string, string> = {}, overrideHeaders: Record<string, string> = {}) {
 	const url = new URL(`${OKM_BASE_URL}${path}`);
 	for (const [k, v] of Object.entries(qs)) url.searchParams.append(k, v);
-	const res = await fetch(url, { headers: okmHeaders() });
+	const res = await fetch(url, { headers: okmHeaders(overrideHeaders) });
 	if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
 	return res;
 }
@@ -44,8 +49,8 @@ async function okmGet(path: string, qs: Record<string, string> = {}) {
 
 const ListDirArgs = z.object({ path: z.string() });
 const ReadFileArgs = z.object({
-	path: z.string(),
-	page_range: z.string().optional().describe("OpenKM page syntax e.g. 1,3-5,-1")
+	docId: z.string().describe("The path of the document, with backslashes removed only forward slashes are allowed"),
+	page_range: z.string().default("1-10").describe("OpenKM page syntax e.g. 1,3-5,-1 (Page range to extract from PDF, defaults to 1-10)")
 });
 const SearchDocsArgs = z.object({
 	query: z.string(),
@@ -82,10 +87,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 		{
 			name: "read_file",
 			description:
-				"Return the document contents at `path`. "
-				+ "• If it’s a PDF, returns extracted UTF‑8 text (OpenKM extractor/OCR). "
-				+ "• If it’s other text, returns that text. "
-				+ "• Else returns Base‑64 (with MIME type).",
+				"Return the document contents of `docId`. "
+				+ "• If it’s a PDF, this server attempts to extract and return its UTF‑8 text content. " // Updated description
+				+ "• If it’s other text, returns that text. "
+				+ "• Else returns Base‑64 (with MIME type).",
 			inputSchema: zodToJsonSchema(ReadFileArgs) as ToolInput,
 		},
 		{
@@ -129,52 +134,79 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 		/* ---- read_file ------------------------------------------------ */
 		if (name === "read_file") {
-			const { path } = ReadFileArgs.parse(args) as ReadFileParams;
+			const { docId, page_range } = ReadFileArgs.parse(args) as ReadFileParams;
 
-			// 1) Try to get text directly (works if OpenKM extractor already ran)
-			const textRes = await okmGet("/services/rest/document/getContent", {
-				docPath: path,
-				inline: "true",
-			});
-			const mime = textRes.headers.get("content-type") ?? "application/octet-stream";
+			// 1) Get the document content.
+			const fileResponse = await okmGet("/services/rest/document/getContent", {
+				docId: docId,
+			}, { Accept: "application/octet-stream" });
 
-			if (mime.startsWith("text/")) {
-				return { content: [{ type: "text", text: await textRes.text() }] };
+			const fileMimeType = fileResponse.headers.get("content-type")?.split(';')[0].trim() ?? "application/octet-stream";
+			const fileBuffer = Buffer.from(await fileResponse.arrayBuffer());
+
+			if (fileMimeType.startsWith("text/")) {
+				return { content: [{ type: "text", text: fileBuffer.toString("utf8") }] };
+			} else {
+				try {
+					const text = await extractText(fileBuffer, page_range);
+
+					return { content: [{ type: "text", text: text, mimeType: fileMimeType }] };
+
+				} catch (pdfError) {
+					const errorMessage = pdfError instanceof Error ? pdfError.message : String(pdfError);
+					console.error(`Error parsing PDF (docId: ${docId}):`, errorMessage);
+					return {
+						content: [{
+							type: "text",
+							text: `Error extracting text from PDF (docId: ${docId}). Details: ${errorMessage}`,
+						}],
+						isError: true,
+					};
+				}
 			}
-
-			// 2) Fallback: if PDF blob, request again with `Accept: text/plain`
-			if (mime === "application/pdf") {
-				// Optionally, implement PDF text extraction here if needed.
-			}
-
-			// Keep sample simple; fallback to Base‑64
-			const buf = Buffer.from(await textRes.arrayBuffer());
-			return {
-				content: [{
-					type: "text",
-					text: buf.toString("base64"),
-					mimeType: mime
-				}],
-			};
 		}
 
 		/* ---- search_documents ---------------------------------------- */
+		type QueryResult = {
+			queryResult: Array<Hit>;
+		};
+		type Hit = {
+			attachment: boolean;
+			excerpt: string;
+			node: {
+				path: string;
+				uuid: string;
+				// … autres champs omis
+			};
+			score: number;
+		};
+
 		if (name === "search_documents") {
 			const { query, limit } = SearchDocsArgs.parse(args) as SearchDocsParams;
+
+			// Appel à l’API OKM
 			const res = await okmGet("/services/rest/search/findByContent", {
-				content: query,
-				limit: String(limit),
+				content: query
 			});
-			const hits = await res.json() as { result: any[] };
-			const out = hits.result.map((h: any) => ({
-				path: h.document.path,
-				docId: h.document.uuid,
-				excerpt: h.excerpt,
-			}));
+			const payload = (await res.json()) as QueryResult;
+			// On slice après coup pour respecter le limit
+			const out = (payload.queryResult || [])
+				.slice(0, limit)
+				.map((hit: Hit) =>
+					`path: ${hit.node.path}\n` +
+					`docId: ${hit.node.uuid}\n` +
+					`excerpt: ${hit.excerpt}\n`
+				).join("\n");
 
-			return { content: [{ type: "json", json: out }] };
+			return {
+				content: [
+					{
+						type: "text",
+						text: out,
+					}
+				]
+			};
 		}
-
 		/* ---- get_metadata -------------------------------------------- */
 		if (name === "get_metadata") {
 			const { path } = GetMetaArgs.parse(args) as GetMetaParams;
@@ -189,6 +221,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
+		console.error(`Error in tool ${name}:`, msg); // Log the error server-side as well
 		return {
 			content: [{ type: "text", text: `Error: ${msg}` }],
 			isError: true,
@@ -196,12 +229,56 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 	}
 });
 
-/* ---------- 6.  Boot the server ------------------------------------ */
+/* ---------- 6.  Helpers         ----------------------------------- */
+
+// Parse a page range string like "1,3-5,-1" into a list of page numbers (1-based)
+function parsePageRange(pageRange: string, numPages: number): number[] {
+	const pages = new Set<number>();
+	const parts = pageRange.split(",");
+	for (let part of parts) {
+		part = part.trim();
+		if (!part) continue;
+		if (part === "-1") {
+			pages.add(numPages);
+		} else if (/^\d+$/.test(part)) {
+			const n = parseInt(part, 10);
+			if (n >= 1 && n <= numPages) pages.add(n);
+		} else if (/^(\d+)-(\d+)$/.test(part)) {
+			const [, startStr, endStr] = part.match(/^(\d+)-(\d+)$/)!;
+			let start = parseInt(startStr, 10);
+			let end = parseInt(endStr, 10);
+			if (start > end) [start, end] = [end, start];
+			for (let i = start; i <= end; i++) {
+				if (i >= 1 && i <= numPages) pages.add(i);
+			}
+		}
+	}
+	// Always sort the result
+	return Array.from(pages).filter(p => p >= 1 && p <= numPages).sort((a, b) => a - b);
+}
+
+async function extractText(fileBuffer: Buffer, pageRange: string): Promise<string> {
+	const loadingTask = getDocument(new Uint8Array(fileBuffer));
+	const pdf = await loadingTask.promise;
+	const numPages = pdf.numPages;
+
+	const pagesToExtract = parsePageRange(pageRange, numPages);
+	if (pagesToExtract.length === 0) {
+		return `No valid pages selected (range: "${pageRange}", total pages: ${numPages})`;
+	}
+
+	let fullText = "";
+	for (const i of pagesToExtract) {
+		const page = await pdf.getPage(i);
+		const { items } = await page.getTextContent();
+		fullText += items.map(i => ('str' in i ? i.str : '')).join('') + '\n\n';
+	}
+	return fullText;
+}
+/* ---------- 7.  Boot the server ------------------------------------ */
 
 (async () => {
 	const transport = new StdioServerTransport();
 	await server.connect(transport);
 	console.error("OpenKM Filesystem MCP ready (stdio transport)");
 })();
-
-
