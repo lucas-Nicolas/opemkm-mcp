@@ -88,7 +88,9 @@ const SearchDocsArgs = z.object({
     query: z.string(),
     limit: z.number().int().positive().max(100).default(10)
 });
-const GetMetaArgs = z.object({ path: z.string() });
+const GetMetaArgs = z.object({
+    nodeId: z.string().describe("Document UUID or path to get metadata for")
+});
 // Metadata-related schemas
 const AddKeywordArgs = z.object({
     nodeId: z.string().describe("Document UUID or path"),
@@ -139,8 +141,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
         {
             name: "get_metadata",
-            description: "Retrieve metadata (size, author, created, modified, keywords, etc.) for "
-                + "a document or folder at the given repository `path`.",
+            description: "Retrieve metadata (size, author, created, modified, keywords, categories, etc.) for "
+                + "a document using its UUID or path.",
             inputSchema: zodToJsonSchema(GetMetaArgs),
         },
         {
@@ -242,10 +244,20 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         /* ---- get_metadata -------------------------------------------- */
         if (name === "get_metadata") {
-            const { path } = GetMetaArgs.parse(args);
-            const res = await okmGet("/services/rest/document/getProperties", {
-                docPath: path,
-            });
+            const { nodeId } = GetMetaArgs.parse(args);
+            // Try first with docId parameter (for UUIDs), then fallback to docPath for paths
+            let res;
+            try {
+                res = await okmGet("/services/rest/document/getProperties", {
+                    docId: nodeId,
+                });
+            }
+            catch (err) {
+                // Fallback to path-based lookup
+                res = await okmGet("/services/rest/document/getProperties", {
+                    docPath: nodeId,
+                });
+            }
             const meta = await res.json();
             return { content: [{ type: "json", json: meta }] };
         }
