@@ -49,6 +49,26 @@ async function okmPut(path, qs = {}, body, overrideHeaders = {}) {
         throw new Error(`${res.status} ${res.statusText}`);
     return res;
 }
+async function okmPost(path, qs = {}, body, overrideHeaders = {}) {
+    const url = new URL(`${OKM_BASE_URL}${path}`);
+    for (const [k, v] of Object.entries(qs))
+        url.searchParams.append(k, v);
+    const options = {
+        method: 'POST',
+        headers: okmHeaders(overrideHeaders),
+    };
+    if (body) {
+        options.body = body;
+        if (typeof body === 'object' && !(body instanceof Buffer)) {
+            options.headers['Content-Type'] = 'application/xml';
+            options.body = typeof body === 'string' ? body : JSON.stringify(body);
+        }
+    }
+    const res = await fetch(url, options);
+    if (!res.ok)
+        throw new Error(`${res.status} ${res.statusText}`);
+    return res;
+}
 async function okmDelete(path, qs = {}, overrideHeaders = {}) {
     const url = new URL(`${OKM_BASE_URL}${path}`);
     for (const [k, v] of Object.entries(qs))
@@ -232,7 +252,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         /* ---- add_keyword --------------------------------------------- */
         if (name === "add_keyword") {
             const { nodeId, keyword } = AddKeywordArgs.parse(args);
-            await okmPut("/services/rest/property/addKeyword", {
+            await okmPost("/services/rest/property/addKeyword", {
                 nodeId: nodeId,
                 keyword: keyword,
             });
@@ -250,7 +270,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         /* ---- add_category -------------------------------------------- */
         if (name === "add_category") {
             const { nodeId, catId } = AddCategoryArgs.parse(args);
-            await okmPut("/services/rest/property/addCategory", {
+            await okmPost("/services/rest/property/addCategory", {
                 nodeId: nodeId,
                 catId: catId,
             });
