@@ -45,6 +45,33 @@ async function okmGet(path: string, qs: Record<string, string> = {}, overrideHea
 	return res;
 }
 
+async function okmPut(path: string, qs: Record<string, string> = {}, body?: any, overrideHeaders: Record<string, string> = {}) {
+	const url = new URL(`${OKM_BASE_URL}${path}`);
+	for (const [k, v] of Object.entries(qs)) url.searchParams.append(k, v);
+	const options: any = {
+		method: 'PUT',
+		headers: okmHeaders(overrideHeaders),
+	};
+	if (body) {
+		options.body = body;
+		if (typeof body === 'object' && !(body instanceof Buffer)) {
+			options.headers['Content-Type'] = 'application/xml';
+			options.body = typeof body === 'string' ? body : JSON.stringify(body);
+		}
+	}
+	const res = await fetch(url, options);
+	if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+	return res;
+}
+
+async function okmDelete(path: string, qs: Record<string, string> = {}, overrideHeaders: Record<string, string> = {}) {
+	const url = new URL(`${OKM_BASE_URL}${path}`);
+	for (const [k, v] of Object.entries(qs)) url.searchParams.append(k, v);
+	const res = await fetch(url, { method: 'DELETE', headers: okmHeaders(overrideHeaders) });
+	if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+	return res;
+}
+
 /* ---------- 2.  Zod argument schemas -------------------------------- */
 
 const ListDirArgs = z.object({ path: z.string() });
@@ -58,10 +85,38 @@ const SearchDocsArgs = z.object({
 });
 const GetMetaArgs = z.object({ path: z.string() });
 
+// Metadata-related schemas
+const AddKeywordArgs = z.object({
+	nodeId: z.string().describe("Document UUID or path"),
+	keyword: z.string().describe("Keyword to add")
+});
+const RemoveKeywordArgs = z.object({
+	nodeId: z.string().describe("Document UUID or path"),
+	keyword: z.string().describe("Keyword to remove")
+});
+const AddCategoryArgs = z.object({
+	nodeId: z.string().describe("Document UUID or path"),
+	catId: z.string().describe("Category UUID or path (e.g., /okm:categories/contracts)")
+});
+const AddPropertyGroupArgs = z.object({
+	nodeId: z.string().describe("Document UUID or path"),
+	grpName: z.string().describe("Property group name (e.g., okg:technology)")
+});
+const SetPropertyGroupArgs = z.object({
+	nodeId: z.string().describe("Document UUID or path"),
+	grpName: z.string().describe("Property group name"),
+	properties: z.record(z.string(), z.any()).describe("Properties as key-value pairs")
+});
+
 type ListDirParams = z.infer<typeof ListDirArgs>;
 type ReadFileParams = z.infer<typeof ReadFileArgs>;
 type SearchDocsParams = z.infer<typeof SearchDocsArgs>;
 type GetMetaParams = z.infer<typeof GetMetaArgs>;
+type AddKeywordParams = z.infer<typeof AddKeywordArgs>;
+type RemoveKeywordParams = z.infer<typeof RemoveKeywordArgs>;
+type AddCategoryParams = z.infer<typeof AddCategoryArgs>;
+type AddPropertyGroupParams = z.infer<typeof AddPropertyGroupArgs>;
+type SetPropertyGroupParams = z.infer<typeof SetPropertyGroupArgs>;
 
 const ToolInputSchema = ToolSchema.shape.inputSchema;
 type ToolInput = z.infer<typeof ToolInputSchema>;
@@ -106,6 +161,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 				"Retrieve metadata (size, author, created, modified, keywords, etc.) for "
 				+ "a document or folder at the given repository `path`.",
 			inputSchema: zodToJsonSchema(GetMetaArgs) as ToolInput,
+		},
+		{
+			name: "add_keyword",
+			description:
+				"Add a keyword to a document. Keywords help categorize and search for documents.",
+			inputSchema: zodToJsonSchema(AddKeywordArgs) as ToolInput,
+		},
+		{
+			name: "remove_keyword",
+			description:
+				"Remove a keyword from a document.",
+			inputSchema: zodToJsonSchema(RemoveKeywordArgs) as ToolInput,
+		},
+		{
+			name: "add_category",
+			description:
+				"Add a category to a document. Categories provide hierarchical organization.",
+			inputSchema: zodToJsonSchema(AddCategoryArgs) as ToolInput,
+		},
+		{
+			name: "add_property_group",
+			description:
+				"Add a property group to a document. Property groups contain custom metadata fields.",
+			inputSchema: zodToJsonSchema(AddPropertyGroupArgs) as ToolInput,
+		},
+		{
+			name: "set_property_group",
+			description:
+				"Set values for properties in an existing property group on a document.",
+			inputSchema: zodToJsonSchema(SetPropertyGroupArgs) as ToolInput,
 		},
 	],
 }));
@@ -215,6 +300,67 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 			});
 			const meta = await res.json();
 			return { content: [{ type: "json", json: meta }] };
+		}
+
+		/* ---- add_keyword --------------------------------------------- */
+		if (name === "add_keyword") {
+			const { nodeId, keyword } = AddKeywordArgs.parse(args) as AddKeywordParams;
+			await okmPut("/services/rest/property/addKeyword", {
+				nodeId: nodeId,
+				keyword: keyword,
+			});
+			return { content: [{ type: "text", text: `Successfully added keyword "${keyword}" to ${nodeId}` }] };
+		}
+
+		/* ---- remove_keyword ------------------------------------------ */
+		if (name === "remove_keyword") {
+			const { nodeId, keyword } = RemoveKeywordArgs.parse(args) as RemoveKeywordParams;
+			await okmDelete("/services/rest/property/removeKeyword", {
+				nodeId: nodeId,
+				keyword: keyword,
+			});
+			return { content: [{ type: "text", text: `Successfully removed keyword "${keyword}" from ${nodeId}` }] };
+		}
+
+		/* ---- add_category -------------------------------------------- */
+		if (name === "add_category") {
+			const { nodeId, catId } = AddCategoryArgs.parse(args) as AddCategoryParams;
+			await okmPut("/services/rest/property/addCategory", {
+				nodeId: nodeId,
+				catId: catId,
+			});
+			return { content: [{ type: "text", text: `Successfully added category "${catId}" to ${nodeId}` }] };
+		}
+
+		/* ---- add_property_group -------------------------------------- */
+		if (name === "add_property_group") {
+			const { nodeId, grpName } = AddPropertyGroupArgs.parse(args) as AddPropertyGroupParams;
+			await okmPut("/services/rest/propertyGroup/addGroup", {
+				nodeId: nodeId,
+				grpName: grpName,
+			});
+			return { content: [{ type: "text", text: `Successfully added property group "${grpName}" to ${nodeId}` }] };
+		}
+
+		/* ---- set_property_group -------------------------------------- */
+		if (name === "set_property_group") {
+			const { nodeId, grpName, properties } = SetPropertyGroupArgs.parse(args) as SetPropertyGroupParams;
+			
+			// Convert properties to XML format expected by OpenKM
+			const xmlProperties = Object.entries(properties)
+				.map(([key, value]) => `<${key}>${value}</${key}>`)
+				.join('\n');
+			
+			const xmlBody = `<simplePropertiesGroup>
+				${xmlProperties}
+			</simplePropertiesGroup>`;
+			
+			await okmPut("/services/rest/propertyGroup/setPropertiesSimple", {
+				nodeId: nodeId,
+				grpName: grpName,
+			}, xmlBody);
+			
+			return { content: [{ type: "text", text: `Successfully set properties for group "${grpName}" on ${nodeId}` }] };
 		}
 
 		throw new Error(`Unknown tool: ${name}`);
