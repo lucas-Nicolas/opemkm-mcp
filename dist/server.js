@@ -258,8 +258,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
                     docPath: nodeId,
                 });
             }
-            const meta = await res.json();
-            return { content: [{ type: "json", json: meta }] };
+            // OpenKM returns XML by default, so we'll get the text and return it as text
+            // This way the MCP client can handle the XML response properly
+            const text = await res.text();
+            return { content: [{ type: "text", text: text }] };
         }
         /* ---- add_keyword --------------------------------------------- */
         if (name === "add_keyword") {
